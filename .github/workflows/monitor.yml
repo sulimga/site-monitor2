@@ -1,0 +1,40 @@
+name: Listing Status Monitor
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Завантажити код репозиторію
+        uses: actions/checkout@v4
+
+      - name: Встановити Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Встановити залежності
+        run: pip install -r requirements.txt
+
+      - name: Запустити перевірку
+        env:
+          SITE_COOKIE: ${{ secrets.SITE_COOKIE }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          SITE_BASE_URL: ${{ secrets.SITE_BASE_URL }}
+          SITE_CABINET_URL: ${{ secrets.SITE_CABINET_URL }}
+        run: python lun_monitor.py --once
+
+      - name: Зберегти лічильник підряд помилок назад у репозиторій
+        if: always()
+        run: |
+          git config user.name "listing-monitor-bot"
+          git config user.email "actions@github.com"
+          git add monitor_error_state.json
+          git diff --quiet --cached || git commit -m "Оновлення лічильника помилок"
+          git push
