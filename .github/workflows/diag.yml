@@ -1,0 +1,69 @@
+name: Діагностика доступу (лише читання)
+
+# Запускається тільки вручну. Робить по одному GET-запиту і показує, ЩО відповів сайт
+# (код, тип відповіді, сервер, короткий текст помилки) — щоб відрізнити протухлий cookie
+# від блокування запитів з GitHub. Нічого не змінює, ставки не чіпає, дані оголошень не виводить.
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  diag:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - run: pip install --quiet requests
+      - name: Перевірка
+        env:
+          SITE_COOKIE: ${{ secrets.SITE_COOKIE }}
+          SITE_BASE_URL: ${{ secrets.SITE_BASE_URL }}
+          SITE_CABINET_URL: ${{ secrets.SITE_CABINET_URL }}
+        run: |
+          python - <<'PY'
+          import os, re, requests
+          base = os.environ["SITE_BASE_URL"].strip().rstrip("/")
+          cab = os.environ["SITE_CABINET_URL"].strip().rstrip("/")
+          cookie = os.environ["SITE_COOKIE"].strip()
+          ua = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+                "(KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36")
+          hdr = {"accept": "application/json, text/plain, */*", "accept-language": "uk-UA",
+                 "origin": cab, "referer": cab + "/", "user-agent": ua}
+
+          def note(title, msg):
+              msg = msg.replace("%", "%25").replace("\r", " ").replace("\n", " ")
+              print(f"::warning title={title}::{msg}")
+
+          def probe(title, url, with_cookie, params=None):
+              h = dict(hdr)
+              if with_cookie:
+                  h["cookie"] = cookie
+              try:
+                  r = requests.get(url, headers=h, params=params, timeout=30)
+              except Exception as e:
+                  return note(title, f"запит не пройшов: {type(e).__name__}: {e}")
+              ct = r.headers.get("content-type", "")
+              parts = [f"HTTP {r.status_code}", f"type={ct.split(';')[0]}",
+                       f"server={r.headers.get('server', '-')}",
+                       f"cf-ray={'так' if 'cf-ray' in r.headers else 'ні'}"]
+              if r.status_code == 200 and "json" in ct:
+                  try:
+                      j = r.json()
+                      parts.append(f"json status={j.get('status')} keys={sorted(j)[:6]}")
+                  except ValueError:
+                      parts.append("json не розібрався")
+              elif r.status_code != 200:
+                  body = re.sub(r"\s+", " ", re.sub(r"<[^>]+>", " ", r.text))[:300]
+                  parts.append(f"текст: {body}")
+              note(title, " · ".join(parts))
+
+          print("cookie задано:", bool(cookie), "· довжина:", len(cookie))
+          probe("1 API з cookie", base + "/api/offers/list/", True,
+                {"page": 1, "limit": 1, "status": 10, "mode": 10})
+          probe("2 API без cookie", base + "/api/offers/list/", False,
+                {"page": 1, "limit": 1, "status": 10, "mode": 10})
+          probe("3 головна без cookie", base + "/", False)
+          PY
