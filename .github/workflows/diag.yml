@@ -13,6 +13,7 @@ jobs:
   diag:
     runs-on: ubuntu-latest
     steps:
+      - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
@@ -23,7 +24,7 @@ jobs:
           SITE_BASE_URL: ${{ secrets.SITE_BASE_URL }}
           SITE_CABINET_URL: ${{ secrets.SITE_CABINET_URL }}
         run: |
-          python - <<'PY'
+          PYTHONPATH=. python - <<'PY'
           import os, re, requests
           base = os.environ["SITE_BASE_URL"].strip().rstrip("/")
           cab = os.environ["SITE_CABINET_URL"].strip().rstrip("/")
@@ -60,10 +61,32 @@ jobs:
                   parts.append(f"текст: {body}")
               note(title, " · ".join(parts))
 
-          print("cookie задано:", bool(cookie), "· довжина:", len(cookie))
-          probe("1 API з cookie", base + "/api/offers/list/", True,
-                {"page": 1, "limit": 1, "status": 10, "mode": 10})
-          probe("2 API без cookie", base + "/api/offers/list/", False,
-                {"page": 1, "limit": 1, "status": 10, "mode": 10})
+          import time
+          import lun_monitor as M                       # ті самі заголовки й параметри, що в моніторі
+          MH = dict(M.HEADERS)
+          print("cookie задано:", bool(cookie), "· довжина:", len(cookie), "· UA монітора:", MH["user-agent"][-30:])
+          L1 = {"page": 1, "limit": 1, "status": 10, "mode": 10}
+          probe("1 API з cookie", base + "/api/offers/list/", True, L1)
+          probe("2 API без cookie", base + "/api/offers/list/", False, L1)
           probe("3 головна без cookie", base + "/", False)
+          hdr = MH                                       # далі — точно як монітор
+          probe("4 як монітор limit=1", base + "/api/offers/list/", True, L1)
+          probe("5 як монітор limit=100", base + "/api/offers/list/", True, dict(M.OFFERS_LIST_PARAMS))
+
+          # 6: повний прохід списку, як робить монітор (fetch_offers), з записом кожного запиту
+          real_get, log = requests.get, []
+          def spy(url, **kw):
+              t = time.monotonic()
+              r = real_get(url, **kw)
+              log.append(f"p{(kw.get('params') or {}).get('page')}:{r.status_code}"
+                         f"{'cf' if 'text/html' in r.headers.get('content-type','') else ''}/{time.monotonic()-t:.0f}s")
+              return r
+          M.requests.get = spy
+          t0 = time.monotonic()
+          try:
+              n = len(M.fetch_offers())
+              res = f"OK, оголошень {n}"
+          except Exception as e:
+              res = f"ПОМИЛКА {type(e).__name__}: {str(e)[:120]}"
+          note("6 повний список як монітор", f"{res} · {time.monotonic()-t0:.0f} с · " + " ".join(log))
           PY
