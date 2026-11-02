@@ -114,13 +114,15 @@ OFFERS_LIST_PARAMS = {
 
 # ------------------------------------------------------------
 # ПРОМІЖНИЙ ВАРІАНТ (02.11.2026): перевіряємо ЛИШЕ продаж квартир і продаж будинків.
-# Решта категорій (оренда, комерція, земля, кімнати, паркомісця) не перевіряється зовсім —
-# по них не робиться жодного запиту pickup-item, тож запитів до сайту значно менше.
-# Пари (itemTypeId, operTypeId) з даних оголошення rieltor:
-#   itemTypeId: 1 квартира, 2 кімната, 3 будинок, 4 комерція, 5 земля, 6 паркомісце
-#   operTypeId: 1 продаж, 2 оренда
-# Повернути всі категорії: у check_once() розкоментувати рядок «for offer in offers:»
-# і закоментувати «for offer in monitored:» (або дописати потрібні пари сюди).
+# Список оголошень просимо в сайту вже відфільтрованим (як кабінет: itemType/operType у запиті),
+# тож сторінок списку в рази менше, а по решті категорій (оренда, комерція, земля, кімнати,
+# паркомісця) не робиться жодного запиту.
+# Пари (itemType, operType) rieltor:
+#   itemType: 1 квартира, 2 кімната, 3 будинок, 4 комерція, 5 земля, 6 паркомісце
+#   operType: 1 продаж, 2 оренда
+# Додати категорію — дописати пару сюди. Повернути всі категорії: у check_once() розкоментувати
+# «offers = fetch_offers()» і «for offer in offers:», закоментувати блок «ПРОМІЖНИЙ ВАРІАНТ»
+# і «for offer in monitored:».
 # ------------------------------------------------------------
 MONITORED_CATEGORIES = {
     (1, 1): "продаж квартир",
@@ -151,8 +153,12 @@ HEADERS = {
 REPRESENTABILITY_OK = 1
 
 
-def fetch_offers() -> list[dict]:
-    """Повертає ПОВНИЙ список оголошень, проходячи всі сторінки пагінації."""
+def fetch_offers(extra_params: dict | None = None) -> list[dict]:
+    """
+    Повертає ПОВНИЙ список оголошень, проходячи всі сторінки пагінації.
+    extra_params — фільтр кабінету rieltor, напр. {"itemType": 1, "operType": 1}
+    (продаж квартир): сайт сам віддає лише цю категорію, тож сторінок у рази менше.
+    """
     headers = dict(HEADERS)
     headers["cookie"] = SITE_COOKIE
 
@@ -161,6 +167,8 @@ def fetch_offers() -> list[dict]:
 
     while True:
         params = dict(OFFERS_LIST_PARAMS)
+        if extra_params:
+            params.update(extra_params)
         params["page"] = page
 
         response = requests.get(
@@ -382,10 +390,27 @@ def check_once() -> list[dict]:
         {"offer": ..., "old_rate": ..., "new_rate": ...,
          "representability_rate": ..., "reason": ..., "blocked": bool}
     """
-    offers = fetch_offers()
+    # Було — увесь список, усі категорії (~17 сторінок по 100). Не видаляти; щоб повернути,
+    # розкоментувати цей рядок і закоментувати блок «ПРОМІЖНИЙ ВАРІАНТ» нижче:
+    # offers = fetch_offers()
+
+    # ПРОМІЖНИЙ ВАРІАНТ: просимо в сайту лише потрібні категорії — тим самим фільтром, що
+    # й кабінет rieltor (параметри itemType/operType у запиті списку, з HAR від 02.11.2026).
+    offers, seen_ids = [], set()
+    for item_type, oper_type in MONITORED_CATEGORIES:
+        batch = fetch_offers({"itemType": item_type, "operType": oper_type})
+        for offer in batch:
+            if offer.get("id") not in seen_ids:
+                seen_ids.add(offer.get("id"))
+                offers.append(offer)
+        if any(offer_category(o) not in ((item_type, oper_type), (None, None)) for o in batch):
+            # сайт віддав і інші категорії — фільтр не спрацював, у нас уже повний список;
+            # не просимо його ще раз для наступної категорії (відбір зробить select_monitored)
+            log.warning("Сайт проігнорував фільтр категорії — відбираю потрібні зі списку сам.")
+            break
     changes = []
 
-    # ПРОМІЖНИЙ ВАРІАНТ: лише продаж квартир і будинків (див. MONITORED_CATEGORIES).
+    # Запобіжник: якщо сайт колись проігнорує фільтр — зайві категорії все одно відсіються тут.
     monitored = select_monitored(offers)
 
     # Було — усі категорії (не видаляти; щоб повернути, розкоментувати цей рядок
