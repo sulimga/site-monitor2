@@ -2,6 +2,10 @@
 Paid Listing Rate Auto-Bidder + Representative-Status Monitor
 ================================================================
 
+!! ПРОМІЖНИЙ ВАРІАНТ (02.11.2026): перевіряються ЛИШЕ продаж квартир і продаж
+   будинків — див. MONITORED_CATEGORIES. Логіка для решти категорій збережена
+   (вимкнена, не видалена) — як повернути, написано біля MONITORED_CATEGORIES.
+
 Продовжує ідею попередньої версії (яка тільки СПОВІЩАЛА про втрату
 представництва), але тепер сам ВИПРАВЛЯЄ ситуацію:
 
@@ -106,6 +110,21 @@ OFFERS_LIST_PARAMS = {
     "limit": 100,
     "status": 10,
     "mode": 10,
+}
+
+# ------------------------------------------------------------
+# ПРОМІЖНИЙ ВАРІАНТ (02.11.2026): перевіряємо ЛИШЕ продаж квартир і продаж будинків.
+# Решта категорій (оренда, комерція, земля, кімнати, паркомісця) не перевіряється зовсім —
+# по них не робиться жодного запиту pickup-item, тож запитів до сайту значно менше.
+# Пари (itemTypeId, operTypeId) з даних оголошення rieltor:
+#   itemTypeId: 1 квартира, 2 кімната, 3 будинок, 4 комерція, 5 земля, 6 паркомісце
+#   operTypeId: 1 продаж, 2 оренда
+# Повернути всі категорії: у check_once() розкоментувати рядок «for offer in offers:»
+# і закоментувати «for offer in monitored:» (або дописати потрібні пари сюди).
+# ------------------------------------------------------------
+MONITORED_CATEGORIES = {
+    (1, 1): "продаж квартир",
+    (3, 1): "продаж будинків",
 }
 
 # ============================================================
@@ -265,6 +284,40 @@ def is_paid_offer(offer: dict) -> bool:
     return (offer.get("rate") or 0) > 0
 
 
+def _as_int(value):
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def offer_category(offer: dict) -> tuple:
+    """(itemTypeId, operTypeId) оголошення — ключ для MONITORED_CATEGORIES."""
+    return _as_int(offer.get("itemTypeId")), _as_int(offer.get("operTypeId"))
+
+
+def select_monitored(offers: list[dict]) -> list[dict]:
+    """
+    Лишає тільки оголошення категорій з MONITORED_CATEGORIES (проміжний варіант).
+    Якщо в списку взагалі немає полів itemTypeId/operTypeId — це помилка (а не
+    «перевіряти нічого»), щоб монітор не мовчав, нічого насправді не перевіряючи.
+    """
+    if offers and not any(None not in offer_category(o) for o in offers):
+        raise RuntimeError(
+            "У списку оголошень немає полів itemTypeId/operTypeId — "
+            "не можу відібрати продаж квартир і будинків."
+        )
+    monitored = [o for o in offers if offer_category(o) in MONITORED_CATEGORIES]
+    counts = {name: 0 for name in MONITORED_CATEGORIES.values()}
+    for o in monitored:
+        counts[MONITORED_CATEGORIES[offer_category(o)]] += 1
+    log.info(
+        "Усього оголошень: %s. Під наглядом %s (%s), решту категорій не перевіряємо.",
+        len(offers), len(monitored), ", ".join(f"{k}: {v}" for k, v in counts.items()),
+    )
+    return monitored
+
+
 def get_max_ceiling(item_type_id: int, oper_type_id: int) -> int:
     """
     Стеля ставки — вище якої здаємось незалежно від того, що тримає
@@ -332,7 +385,13 @@ def check_once() -> list[dict]:
     offers = fetch_offers()
     changes = []
 
-    for offer in offers:
+    # ПРОМІЖНИЙ ВАРІАНТ: лише продаж квартир і будинків (див. MONITORED_CATEGORIES).
+    monitored = select_monitored(offers)
+
+    # Було — усі категорії (не видаляти; щоб повернути, розкоментувати цей рядок
+    # і закоментувати наступний):
+    # for offer in offers:
+    for offer in monitored:
         if not is_paid_offer(offer):
             log.info("%s -> (безкоштовне, пропускаємо)", format_offer_line(offer))
             continue
@@ -537,6 +596,15 @@ def _check_config() -> bool:
 def _describe_exception(exc: Exception) -> str:
     if isinstance(exc, requests.HTTPError) and exc.response is not None:
         status = exc.response.status_code
+        body = (exc.response.text or "")[:2000].lower()
+        if status == 403 and ("1008" in body or "ip_range" in body or "blocked your ip" in body):
+            # Cloudflare сайту блокує діапазон IP, з якого запущено перевірку (на GitHub — кожен
+            # запуск з іншої адреси). Cookie тут ні до чого — оновлювати його марно.
+            return (
+                "Сайт заблокував IP-адресу, з якої запущено перевірку (Cloudflare 1008, HTTP 403).\n"
+                "Cookie тут ні до чого. На GitHub кожен запуск отримує іншу адресу — "
+                "наступний може пройти."
+            )
         if status in (401, 403):
             return (
                 f"Сайт-джерело відповів помилкою авторизації (HTTP {status}).\n"
